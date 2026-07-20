@@ -17,6 +17,13 @@ It's a reusable pipe: any backend that implements the ingest contract becomes a 
 The reference backend is **[BeatDash](https://github.com/iamshiron/BeatDash)** — but nothing here
 is BeatDash-specific.
 
+## Download & install
+
+Grab the latest signed APK from the [**Releases**](../../releases) page and open it on your phone.
+The first time, you'll be asked to allow *Install unknown apps* for your browser or file manager.
+Requires **Android 8.0 (API 26)** or newer. Builds are produced by CI
+(`.github/workflows/build-apk.yml`).
+
 ## Screenshots
 
 | Home | Activity | Settings |
@@ -123,6 +130,19 @@ Kotlin Multiplatform (Android + shared core; iOS is out of scope for now).
 
 Tooling is pinned via [`mise`](https://mise.jdx.dev) (`mise.toml`): JDK 21 for the Gradle daemon,
 plus the Android SDK location.
+
+### Releasing (maintainers)
+
+Pushing a `v*` tag builds a **signed release APK** and publishes it as a GitHub Release:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow needs four repository **Actions secrets** — `HSP_KEYSTORE_BASE64`,
+`HSP_KEYSTORE_PASSWORD`, `HSP_KEY_ALIAS`, `HSP_KEY_PASSWORD`. The signing keystore itself is never
+committed (it's gitignored); keep a backup, since Android requires the *same* key to ship updates.
 
 ## Security
 

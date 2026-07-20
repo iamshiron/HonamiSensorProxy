@@ -35,6 +35,19 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+    signingConfigs {
+        // Release signing is driven by env vars (set by CI from repo secrets). When they're absent
+        // — e.g. local dev — the release build is simply left unsigned.
+        create("release") {
+            val keystoreFile = System.getenv("HSP_KEYSTORE_FILE")
+            if (keystoreFile != null) {
+                storeFile = file(keystoreFile)
+                storePassword = System.getenv("HSP_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("HSP_KEY_ALIAS")
+                keyPassword = System.getenv("HSP_KEY_PASSWORD")
+            }
+        }
+    }
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -42,6 +55,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (System.getenv("HSP_KEYSTORE_FILE") != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
     compileOptions {
