@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeContentPadding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -34,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.tooling.preview.Preview
 import io.shiron.honamisensorproxy.bridge.auth.StaticTokenAuthenticator
@@ -59,6 +59,7 @@ private enum class RangePreset(val label: String) {
     Today("Today"),
     Yesterday("Yesterday"),
     Last7Days("Last 7 days"),
+    Last30Days("Last 30 days"),
     Custom("Custom"),
 }
 
@@ -79,9 +80,8 @@ fun App() {
         val providers = rememberHistoricalProviders()
         val permissionGate = rememberPermissionGate()
 
-        var ingestUrl by remember { mutableStateOf("https://beatdash.app/api/health/ingest") }
+        var ingestUrl by remember { mutableStateOf("") }
         var token by remember { mutableStateOf("") }
-        var provisionLink by remember { mutableStateOf("") }
         var scanning by remember { mutableStateOf(false) }
 
         var selectedProviderId by remember { mutableStateOf(providers.firstOrNull()?.id ?: "") }
@@ -114,6 +114,7 @@ fun App() {
                 RangePreset.Today -> today to today.plus(1, DateTimeUnit.DAY)
                 RangePreset.Yesterday -> today.minus(1, DateTimeUnit.DAY) to today
                 RangePreset.Last7Days -> today.minus(6, DateTimeUnit.DAY) to today.plus(1, DateTimeUnit.DAY)
+                RangePreset.Last30Days -> today.minus(29, DateTimeUnit.DAY) to today.plus(1, DateTimeUnit.DAY)
                 RangePreset.Custom -> {
                     val s = customStart ?: today
                     val e = customEnd ?: s
@@ -176,6 +177,7 @@ fun App() {
             modifier = Modifier
                 .safeContentPadding()
                 .fillMaxSize()
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -190,18 +192,12 @@ fun App() {
                 color = HspColors.InkDim,
             )
 
-            // --- Sink configuration ---------------------------------------------------------
-            OutlinedTextField(
-                value = provisionLink,
-                onValueChange = { provisionLink = it },
-                label = { Text("Provisioning payload (scanned JSON or beatsensor:// link)") },
-                singleLine = true,
+            // --- Sink configuration: scan a QR code, or edit the fields directly -------------
+            OutlinedButton(
+                onClick = { scanning = true },
                 enabled = !pushing,
                 modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                keyboardActions = KeyboardActions(onDone = { applyProvisioning(provisionLink) }),
-            )
-            OutlinedButton(onClick = { scanning = true }, enabled = !pushing) { Text("Scan QR code") }
+            ) { Text("Scan QR code to configure sink") }
             OutlinedTextField(
                 value = ingestUrl,
                 onValueChange = { ingestUrl = it },
@@ -218,6 +214,8 @@ fun App() {
                 singleLine = true,
                 enabled = !pushing,
                 modifier = Modifier.fillMaxWidth(),
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             )
 
             HorizontalDivider()
@@ -260,12 +258,7 @@ fun App() {
             HorizontalDivider()
 
             Text("Event log", style = MaterialTheme.typography.titleMedium)
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .verticalScroll(rememberScrollState()),
-            ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
                 for (line in log) {
                     Text(line, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
                 }
@@ -297,7 +290,6 @@ fun App() {
         QrScannerHost(
             active = scanning,
             onResult = { payload ->
-                provisionLink = payload
                 applyProvisioning(payload)
                 scanning = false
             },
