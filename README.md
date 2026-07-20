@@ -15,7 +15,7 @@ It's a reusable pipe: any backend that implements the ingest contract becomes a 
 > it in HSP, and data starts flowing. No per-backend code lives in the app.
 
 The reference backend is **[BeatDash](https://github.com/iamshiron/BeatDash)** — but nothing here
-is BeatDash-specific. The full backend contract is documented in [`BridgeApp.md`](./BridgeApp.md).
+is BeatDash-specific.
 
 ## Screenshots
 
