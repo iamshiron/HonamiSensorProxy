@@ -1,8 +1,8 @@
 package io.shiron.honamisensorproxy
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -13,9 +13,17 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.DateRangePicker
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDateRangePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -27,26 +35,40 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.tooling.preview.Preview
 import io.shiron.honamisensorproxy.bridge.auth.StaticTokenAuthenticator
 import io.shiron.honamisensorproxy.bridge.createBridgeHttpClient
-import io.shiron.honamisensorproxy.bridge.engine.BridgeEngine
-import io.shiron.honamisensorproxy.bridge.engine.BridgeEvent
+import io.shiron.honamisensorproxy.bridge.engine.HistoricalPusher
 import io.shiron.honamisensorproxy.bridge.model.AuthConfig
 import io.shiron.honamisensorproxy.bridge.model.Metric
 import io.shiron.honamisensorproxy.bridge.model.SinkConfig
 import io.shiron.honamisensorproxy.bridge.provisioning.SinkProvisioning
 import io.shiron.honamisensorproxy.bridge.sink.HttpSink
-import io.shiron.honamisensorproxy.bridge.sink.PushResult
-import io.shiron.honamisensorproxy.bridge.source.FakeHeartRateSource
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import androidx.compose.ui.tooling.preview.Preview
+import kotlinx.datetime.Clock
+import kotlinx.datetime.DateTimeUnit
+import kotlinx.datetime.Instant
+import kotlinx.datetime.LocalDate
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.atStartOfDayIn
+import kotlinx.datetime.plus
+import kotlinx.datetime.minus
+import kotlinx.datetime.toLocalDateTime
+
+private enum class RangePreset(val label: String) {
+    Today("Today"),
+    Yesterday("Yesterday"),
+    Last7Days("Last 7 days"),
+    Custom("Custom"),
+}
 
 /**
- * Honami Sensor Proxy (HSP) control panel. It runs the [FakeHeartRateSource] through the
- * [BridgeEngine] into a single [HttpSink], and shows the live event log — enough to prove the
- * whole source → engine → sink pipeline end to end.
+ * Honami Sensor Proxy (HSP) control panel. Configure a sink, pick a **provider** (any
+ * [io.shiron.honamisensorproxy.bridge.source.HistoricalSource]) and a **range**, then push that
+ * window of health data to the sink. Provider-agnostic: Health Connect and the synthetic source
+ * are the same abstraction to this screen.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 @Preview
 fun App() {
@@ -54,17 +76,24 @@ fun App() {
         val scope = rememberCoroutineScope()
         val http = remember { createBridgeHttpClient() }
         val log = remember { mutableStateListOf<String>() }
+        val providers = rememberHistoricalProviders()
+        val permissionGate = rememberPermissionGate()
 
         var ingestUrl by remember { mutableStateOf("https://beatdash.app/api/health/ingest") }
         var token by remember { mutableStateOf("") }
         var provisionLink by remember { mutableStateOf("") }
         var scanning by remember { mutableStateOf(false) }
-        var engineJob by remember { mutableStateOf<Job?>(null) }
-        val running = engineJob != null
+
+        var selectedProviderId by remember { mutableStateOf(providers.firstOrNull()?.id ?: "") }
+        var rangePreset by remember { mutableStateOf(RangePreset.Today) }
+        var customStart by remember { mutableStateOf<LocalDate?>(null) }
+        var customEnd by remember { mutableStateOf<LocalDate?>(null) }
+        var showRangePicker by remember { mutableStateOf(false) }
+        var pushing by remember { mutableStateOf(false) }
 
         fun logLine(line: String) {
             log.add(0, line)
-            if (log.size > 100) log.removeAt(log.lastIndex)
+            if (log.size > 200) log.removeAt(log.lastIndex)
         }
 
         fun applyProvisioning(payload: String) {
@@ -77,43 +106,78 @@ fun App() {
                 .onFailure { logLine("bad provisioning payload: ${it.message}") }
         }
 
-        fun start() {
-            if (running) return
-            log.clear()
-            val sink = HttpSink(
-                config = SinkConfig(
-                    name = "sink",
-                    ingestUrl = ingestUrl.trim(),
-                    metrics = setOf(Metric.HeartRate),
-                    cadenceSeconds = 5,
-                    auth = AuthConfig.StaticToken(token),
-                ),
-                auth = StaticTokenAuthenticator(token),
-                http = http,
-                deviceId = "honami-sensor-proxy",
-            )
-            val engine = BridgeEngine(
-                sources = listOf(FakeHeartRateSource()),
-                sinks = listOf(sink),
-                batchSize = 5,
-                flushIntervalMillis = 5_000L,
-                onEvent = { event -> logLine(event.render()) },
-            )
-            engineJob = scope.launch { engine.run() }
+        // Resolve the selected preset/custom range into [startMillis, endMillis) at local day bounds.
+        fun resolveRange(): Pair<Long, Long> {
+            val tz = TimeZone.currentSystemDefault()
+            val today = Clock.System.now().toLocalDateTime(tz).date
+            val (startDate, endExclusive) = when (rangePreset) {
+                RangePreset.Today -> today to today.plus(1, DateTimeUnit.DAY)
+                RangePreset.Yesterday -> today.minus(1, DateTimeUnit.DAY) to today
+                RangePreset.Last7Days -> today.minus(6, DateTimeUnit.DAY) to today.plus(1, DateTimeUnit.DAY)
+                RangePreset.Custom -> {
+                    val s = customStart ?: today
+                    val e = customEnd ?: s
+                    s to e.plus(1, DateTimeUnit.DAY)
+                }
+            }
+            return startDate.atStartOfDayIn(tz).toEpochMilliseconds() to
+                endExclusive.atStartOfDayIn(tz).toEpochMilliseconds()
         }
 
-        fun stop() {
-            engineJob?.cancel()
-            engineJob = null
+        fun rangeLabel(): String = when (rangePreset) {
+            RangePreset.Custom -> {
+                val s = customStart
+                val e = customEnd
+                if (s == null) "custom (pick dates)" else if (e == null || e == s) "$s" else "$s → $e"
+            }
+            else -> rangePreset.label
+        }
+
+        fun push() {
+            val provider = providers.firstOrNull { it.id == selectedProviderId } ?: return
+            val (startMs, endMs) = resolveRange()
+            logLine("push requested: ${provider.label} · ${rangeLabel()}")
+            permissionGate.ensure(provider) { granted ->
+                if (!granted) {
+                    logLine("permission denied or provider unavailable: ${provider.label}")
+                    return@ensure
+                }
+                pushing = true
+                val sink = HttpSink(
+                    config = SinkConfig(
+                        name = "sink",
+                        ingestUrl = ingestUrl.trim(),
+                        metrics = Metric.entries.toSet(),
+                        cadenceSeconds = 5,
+                        auth = AuthConfig.StaticToken(token),
+                    ),
+                    auth = StaticTokenAuthenticator(token),
+                    http = http,
+                    deviceId = "honami-sensor-proxy",
+                )
+                scope.launch {
+                    try {
+                        HistoricalPusher(listOf(sink)).push(
+                            source = provider,
+                            want = provider.metrics,
+                            startEpochMillis = startMs,
+                            endEpochMillis = endMs,
+                        ) { line -> logLine(line) }
+                    } catch (e: Exception) {
+                        logLine("push error: ${e.message}")
+                    } finally {
+                        pushing = false
+                    }
+                }
+            }
         }
 
         Column(
             modifier = Modifier
-                .background(MaterialTheme.colorScheme.background)
                 .safeContentPadding()
                 .fillMaxSize()
                 .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(
                 "Honami Sensor Proxy",
@@ -125,33 +189,25 @@ fun App() {
                 style = MaterialTheme.typography.labelMedium,
                 color = HspColors.InkDim,
             )
-            Text(
-                if (running) "● streaming — fake heart rate → sink" else "○ idle",
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (running) HspColors.Success else HspColors.InkDim,
-            )
 
+            // --- Sink configuration ---------------------------------------------------------
             OutlinedTextField(
                 value = provisionLink,
                 onValueChange = { provisionLink = it },
                 label = { Text("Provisioning payload (scanned JSON or beatsensor:// link)") },
                 singleLine = true,
-                enabled = !running,
+                enabled = !pushing,
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                 keyboardActions = KeyboardActions(onDone = { applyProvisioning(provisionLink) }),
             )
-            Button(
-                onClick = { scanning = true },
-                enabled = !running,
-            ) { Text("Scan QR code") }
-
+            OutlinedButton(onClick = { scanning = true }, enabled = !pushing) { Text("Scan QR code") }
             OutlinedTextField(
                 value = ingestUrl,
                 onValueChange = { ingestUrl = it },
-                label = { Text("Ingest URL (HTTPS)") },
+                label = { Text("Ingest URL") },
                 singleLine = true,
-                enabled = !running,
+                enabled = !pushing,
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
             )
@@ -160,20 +216,48 @@ fun App() {
                 onValueChange = { token = it },
                 label = { Text("Bearer token") },
                 singleLine = true,
-                enabled = !running,
+                enabled = !pushing,
                 modifier = Modifier.fillMaxWidth(),
             )
 
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(
-                    onClick = { start() },
-                    enabled = !running && ingestUrl.isNotBlank(),
-                ) { Text("Start") }
-                Button(
-                    onClick = { stop() },
-                    enabled = running,
-                ) { Text("Stop") }
+            HorizontalDivider()
+
+            // --- Push from provider + range -------------------------------------------------
+            Text("Push from…", style = MaterialTheme.typography.titleMedium)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (provider in providers) {
+                    FilterChip(
+                        selected = provider.id == selectedProviderId,
+                        onClick = { selectedProviderId = provider.id },
+                        label = { Text(provider.label) },
+                        enabled = !pushing,
+                    )
+                }
             }
+
+            Text("Range", style = MaterialTheme.typography.titleSmall, color = HspColors.InkDim)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (preset in RangePreset.entries) {
+                    FilterChip(
+                        selected = preset == rangePreset,
+                        onClick = {
+                            rangePreset = preset
+                            if (preset == RangePreset.Custom) showRangePicker = true
+                        },
+                        label = { Text(preset.label) },
+                        enabled = !pushing,
+                    )
+                }
+            }
+            Text("Selected: ${rangeLabel()}", style = MaterialTheme.typography.bodySmall, color = HspColors.InkDim)
+
+            Button(
+                onClick = { push() },
+                enabled = !pushing && ingestUrl.isNotBlank() && selectedProviderId.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(if (pushing) "Pushing…" else "Push") }
+
+            HorizontalDivider()
 
             Text("Event log", style = MaterialTheme.typography.titleMedium)
             Column(
@@ -183,12 +267,30 @@ fun App() {
                     .verticalScroll(rememberScrollState()),
             ) {
                 for (line in log) {
-                    Text(
-                        line,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                    )
+                    Text(line, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
                 }
+            }
+        }
+
+        if (showRangePicker) {
+            val pickerState = rememberDateRangePickerState()
+            DatePickerDialog(
+                onDismissRequest = { showRangePicker = false },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val startUtc = pickerState.selectedStartDateMillis
+                        val endUtc = pickerState.selectedEndDateMillis
+                        if (startUtc != null) {
+                            customStart = utcMillisToLocalDate(startUtc)
+                            customEnd = endUtc?.let { utcMillisToLocalDate(it) } ?: customStart
+                            rangePreset = RangePreset.Custom
+                        }
+                        showRangePicker = false
+                    }) { Text("OK") }
+                },
+                dismissButton = { TextButton(onClick = { showRangePicker = false }) { Text("Cancel") } },
+            ) {
+                DateRangePicker(state = pickerState, modifier = Modifier.weight(1f))
             }
         }
 
@@ -204,19 +306,6 @@ fun App() {
     }
 }
 
-private fun BridgeEvent.render(): String = when (this) {
-    BridgeEvent.Started -> "engine started"
-    BridgeEvent.Stopped -> "engine stopped"
-    is BridgeEvent.SourceReady -> "source ready: $id"
-    is BridgeEvent.SourceUnavailable -> "source unavailable: $id ($reason)"
-    is BridgeEvent.SampleEmitted ->
-        "sample ${sample.metric.wireName}=${sample.value} @${sample.epochMillis}"
-    is BridgeEvent.BatchFlushed -> {
-        val outcome = when (val r = result) {
-            is PushResult.Accepted -> "accepted ${r.accepted}/${r.sent}"
-            PushResult.Skipped -> "skipped (no relevant samples)"
-            is PushResult.Failed -> "FAILED (${r.reason})${if (r.retryable) " [retryable]" else ""}"
-        }
-        "flush → $sinkName [$batchSize] : $outcome"
-    }
-}
+/** The Material date picker reports UTC-midnight millis; read the calendar date off it. */
+private fun utcMillisToLocalDate(utcMillis: Long): LocalDate =
+    Instant.fromEpochMilliseconds(utcMillis).toLocalDateTime(TimeZone.UTC).date

@@ -51,6 +51,7 @@ kotlin {
             implementation(libs.androidx.camera.lifecycle)
             implementation(libs.androidx.camera.view)
             implementation(libs.mlkit.barcode.scanning)
+            implementation(libs.androidx.health.connect)
         }
         iosMain.dependencies {
             implementation(libs.ktor.client.darwin)
