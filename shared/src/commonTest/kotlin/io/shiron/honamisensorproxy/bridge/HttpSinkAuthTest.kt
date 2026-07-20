@@ -102,4 +102,26 @@ class HttpSinkAuthTest {
         assertTrue(result is PushResult.Failed)
         assertTrue(!result.retryable, "401 should not be retried")
     }
+
+    @Test
+    fun success2xxWithNonJsonBody_failsCleanlyWithoutThrowing() = runTest {
+        // Regression: pointing at a wrong URL that returns 200 text/html must NOT crash the app.
+        val engine = MockEngine {
+            respond(
+                content = "<!doctype html><html><body>marketing page</body></html>",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/html; charset=utf-8"),
+            )
+        }
+        val client = HttpClient(engine) { installBridgeDefaults() }
+        val config = SinkProvisioning.parse(
+            """{"name":"X","ingest":"https://x.test/ingest","auth":"token","token":"t","metrics":["heart_rate"]}""",
+        ).getOrThrow()
+        val sink = HttpSink(config, StaticTokenAuthenticator("t"), client, "dev-1")
+
+        val result = sink.push(listOf(Sample(Metric.HeartRate, 100f, 1L, "fake")))
+
+        assertTrue(result is PushResult.Failed, "non-JSON 2xx should be a failure, not a crash")
+        assertTrue(!result.retryable, "a wrong-URL 2xx is a config error, not retryable")
+    }
 }

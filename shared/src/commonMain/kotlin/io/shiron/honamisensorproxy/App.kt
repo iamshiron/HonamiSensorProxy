@@ -43,14 +43,14 @@ import kotlinx.coroutines.launch
 import androidx.compose.ui.tooling.preview.Preview
 
 /**
- * MVP control panel for the sensor bridge. It runs the [FakeHeartRateSource] through the
+ * Honami Sensor Proxy (HSP) control panel. It runs the [FakeHeartRateSource] through the
  * [BridgeEngine] into a single [HttpSink], and shows the live event log — enough to prove the
  * whole source → engine → sink pipeline end to end.
  */
 @Composable
 @Preview
 fun App() {
-    MaterialTheme {
+    HspTheme {
         val scope = rememberCoroutineScope()
         val http = remember { createBridgeHttpClient() }
         val log = remember { mutableStateListOf<String>() }
@@ -90,7 +90,7 @@ fun App() {
                 ),
                 auth = StaticTokenAuthenticator(token),
                 http = http,
-                deviceId = "bridge-mvp",
+                deviceId = "honami-sensor-proxy",
             )
             val engine = BridgeEngine(
                 sources = listOf(FakeHeartRateSource()),
@@ -115,11 +115,20 @@ fun App() {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("Sensor Bridge", style = MaterialTheme.typography.headlineSmall)
+            Text(
+                "Honami Sensor Proxy",
+                style = MaterialTheme.typography.headlineSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                "HSP · sensor → HTTP bridge",
+                style = MaterialTheme.typography.labelMedium,
+                color = HspColors.InkDim,
+            )
             Text(
                 if (running) "● streaming — fake heart rate → sink" else "○ idle",
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary,
+                color = if (running) HspColors.Success else HspColors.InkDim,
             )
 
             OutlinedTextField(

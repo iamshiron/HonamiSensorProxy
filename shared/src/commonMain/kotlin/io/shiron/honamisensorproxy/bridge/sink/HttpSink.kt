@@ -12,7 +12,6 @@ import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
-import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
@@ -34,11 +33,31 @@ class HttpSink(
         val relevant = batch.filter { it.metric in config.metrics }
         if (relevant.isEmpty()) return PushResult.Skipped
 
-        val response: HttpResponse = try {
-            http.post(config.ingestUrl) {
+        // The whole request + response handling is guarded: any failure — network, timeout, or
+        // an unexpected/non-JSON body — becomes a PushResult, never an uncaught crash.
+        return try {
+            val response: HttpResponse = http.post(config.ingestUrl) {
                 contentType(ContentType.Application.Json)
                 header(HttpHeaders.Authorization, "Bearer ${auth.accessToken()}")
                 setBody(Envelope(source = deviceId, samples = relevant.map(Sample::toWire)))
+            }
+            when {
+                response.status.isSuccess() -> {
+                    // A real ingest endpoint returns JSON {accepted}. If the body isn't that
+                    // (e.g. a 200 HTML page from a wrong URL), surface it instead of crashing.
+                    val parsed = runCatching { response.body<IngestResponse>() }.getOrNull()
+                    parsed?.let { PushResult.Accepted(it.accepted, relevant.size) }
+                        ?: PushResult.Failed(
+                            "2xx but response was not the expected JSON (wrong ingest URL?)",
+                            retryable = false,
+                        )
+                }
+                response.status.value in 500..599 ->
+                    PushResult.Failed("HTTP ${response.status.value}", retryable = true)
+                response.status.value == 429 ->
+                    PushResult.Failed("rate limited (429)", retryable = true)
+                else ->
+                    PushResult.Failed("HTTP ${response.status.value}", retryable = false)
             }
         } catch (e: CancellationException) {
             // Genuine coroutine cancellation must propagate — never swallow it as a "failure".
@@ -46,18 +65,7 @@ class HttpSink(
         } catch (e: Exception) {
             // Network failure / DNS / TLS / timeout — transient, worth a retry.
             val detail = e.message ?: e::class.simpleName ?: "network error"
-            return PushResult.Failed(detail, retryable = true)
-        }
-
-        return when {
-            response.status.isSuccess() ->
-                PushResult.Accepted(response.body<IngestResponse>().accepted, relevant.size)
-            response.status.value in 500..599 ->
-                PushResult.Failed("HTTP ${response.status.value}", retryable = true)
-            response.status.value == 429 ->
-                PushResult.Failed("rate limited (429)", retryable = true)
-            else ->
-                PushResult.Failed("HTTP ${response.status.value}: ${response.bodyAsText()}", retryable = false)
+            PushResult.Failed(detail, retryable = true)
         }
     }
 }
