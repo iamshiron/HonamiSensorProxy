@@ -1,0 +1,15 @@
+# Tool + environment configuration for the BridgeApp (Honami Sensor Proxy).
+# The Gradle daemon toolchain is pinned to Azul Zulu 21 (see gradle/gradle-daemon-jvm.properties),
+# so we provision the same JDK here to keep local builds reproducible.
+
+[tools]
+java = "zulu-21.48.17.0"
+
+[env]
+# Android SDK location. Overrides can go in a gitignored mise.local.toml.
+ANDROID_HOME = "{{ env.HOME }}/Android/Sdk"
+ANDROID_SDK_ROOT = "{{ env.HOME }}/Android/Sdk"
+
+[settings]
+# Let the [env] block above win even when a global java is already active.
+experimental = true
